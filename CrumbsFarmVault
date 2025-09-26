@@ -1,1 +1,120 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+
+contract CrumbsFarmVault is Ownable2Step, ReentrancyGuard, Pausable {
+    // 📦 Core State
+    address public vaultReceiver;
+    address[] public farmingWallets;
+    uint256 public maxWithdrawLimit;
+    uint256 public lastRotationTimestamp;
+    uint256 public rotationInterval = 3600; // default 1 hour
+    address public latestWallet;
+
+    // 🧠 Multisig
+    address[] public multisigApprovers;
+    mapping(bytes32 => uint256) public proposalVotes;
+
+    // 🤖 Bot Registry
+    struct Bot {
+        string botType;
+        uint256 cooldown;
+        uint256 lastRun;
+    }
+    mapping(address => Bot) public bots;
+
+    // 📣 Events
+    event WalletRotated(address indexed oldWallet, address indexed newWallet);
+    event Deposited(address indexed sender, uint256 amount);
+    event EmergencyWithdraw(address indexed user, uint256 amount);
+    event TokenDrained(address indexed token, uint256 amount);
+    event BotRegistered(address indexed bot, string botType);
+    event MultisigActionProposed(bytes32 indexed proposalId, address target);
+    event MultisigActionExecuted(bytes32 indexed proposalId, address target);
+
+    // 🛠️ Constructor
+    constructor(address _initialOwner, address _vaultReceiver, uint256 _maxWithdrawLimit)
+        Ownable2Step(_initialOwner)
+    {
+        vaultReceiver = _vaultReceiver;
+        maxWithdrawLimit = _maxWithdrawLimit;
+        rotateWallet(); // optional: rotate on deploy
+    }
+
+    // 💸 Deposit ETH
+    function deposit() external payable {
+        emit Deposited(msg.sender, msg.value);
+    }
+
+    // 🔁 Rotate Wallet
+    function rotateWallet() public onlyOwner {
+        require(farmingWallets.length > 0, "No wallets");
+        uint256 index = uint256(keccak256(abi.encode(block.timestamp, msg.sender))) % farmingWallets.length;
+        address newWallet = farmingWallets[index];
+        emit WalletRotated(latestWallet, newWallet);
+        latestWallet = newWallet;
+        vaultReceiver = newWallet;
+        lastRotationTimestamp = block.timestamp;
+    }
+
+    // 🤖 Register Bot
+    function registerBot(address bot, string memory botType, uint256 cooldown) external onlyOwner {
+        bots[bot] = Bot(botType, cooldown, 0);
+        emit BotRegistered(bot, botType);
+    }
+
+    // 🛑 Emergency Withdraw
+    function emergencyWithdraw() external nonReentrant whenPaused {
+        uint256 balance = address(this).balance;
+        require(balance > 0, "No ETH");
+        payable(msg.sender).transfer(balance);
+        emit EmergencyWithdraw(msg.sender, balance);
+    }
+
+    // 🧠 Multisig Proposal
+    function proposeMultisigAction(address target, bytes memory data) external {
+        require(isApprover(msg.sender), "Not approver");
+        bytes32 proposalId = keccak256(abi.encode(target, data));
+        proposalVotes[proposalId] += 1;
+        emit MultisigActionProposed(proposalId, target);
+
+        if (proposalVotes[proposalId] >= 2) {
+            (bool success, ) = target.call(data);
+            require(success, "Execution failed");
+            emit MultisigActionExecuted(proposalId, target);
+        }
+    }
+
+    function isApprover(address addr) internal view returns (bool) {
+        for (uint i = 0; i < multisigApprovers.length; i++) {
+            if (multisigApprovers[i] == addr) return true;
+        }
+        return false;
+    }
+
+    // 🧹 Drain ERC20
+    function drainERC20(address token) external onlyOwner {
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        require(balance > 0, "No tokens");
+        IERC20(token).transfer(vaultReceiver, balance);
+        emit TokenDrained(token, balance);
+    }
+
+    // ⏸️ Pause/Unpause
+    function pauseVault() external onlyOwner {
+        _pause();
+    }
+
+    function unpauseVault() external onlyOwner {
+        _unpause();
+    }
+}
+
+interface IERC20 {
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address to, uint256 amount) external returns (bool);
+}
 
